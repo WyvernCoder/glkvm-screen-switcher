@@ -1,0 +1,13 @@
+{
+  "physicalTarget": "27U8A Pro-S",
+  "kvmBaseUrl": "https://glkvm.local",
+  "kvmUser": "admin",
+  "kvmPassword": "CHANGE_ME",
+
+  "pollSeconds": 5,
+  "revertAfterMisses": 2,
+  "cloneDwellSeconds": 10,
+
+  "revertToSoloWhenIdle": true,
+  "ensureHdrOnSolo": true
+}

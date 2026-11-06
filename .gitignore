@@ -1,0 +1,6 @@
+# Local state, never commit these
+config.json
+logs/
+state/
+*.log
+*.b64
