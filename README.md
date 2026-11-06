@@ -14,6 +14,8 @@ actually watches the stream — then go back to single screen when they leave.
 
 [中文说明](#中文说明) · [MIT License](LICENSE)
 
+![image-20261106231622851](./assets/image-20261106231622851.png)
+
 ---
 
 ## The problem
