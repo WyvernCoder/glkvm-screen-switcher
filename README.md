@@ -1,3 +1,10 @@
+```
+A vibe-project, to auto change the Windows screen mode from "Show only on 1" to "Show only on 2" based on the GLKVM connect status. 
+Useful for the office worker who has a GLKVM device and remote control the PC at the company and continue to play PC games at home. 
+```
+
+
+
 # GLKVM Screen Switcher
 
 **Auto-switch the Windows display topology for a GLKVM / PiKVM box.**
