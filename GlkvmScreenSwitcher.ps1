@@ -51,6 +51,7 @@ $physName  = $cfg.physicalTarget
 $pollSec   = if ($cfg.pollSeconds) { [int]$cfg.pollSeconds } else { 5 }
 $missLimit = if ($cfg.revertAfterMisses) { [int]$cfg.revertAfterMisses } else { 2 }
 $dwellSec  = if ($cfg.cloneDwellSeconds) { [int]$cfg.cloneDwellSeconds } else { 10 }
+$minPrimaryHz = if ($cfg.minPrimaryHz) { [double]$cfg.minPrimaryHz } else { 100 }
 
 function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
@@ -298,10 +299,37 @@ function Test-KvmWatching {
 }
 
 # ------------------------------------------------------------------- actions
-function Save-Blob {
+# A snapshot is only worth keeping if it describes a healthy duplicate:
+# two active paths on one source, physical monitor first, running at its real
+# refresh rate. Anything else (a PBP/split-screen state, a half-applied change)
+# would be replayed later and fail.
+function Test-DuplicateHealthy {
     try {
+        $info = [Switcher]::ActiveJson() | ConvertFrom-Json
+        if ([int]$info.count -lt 2) { return $false }
+        if (-not $info.duplicate) { return $false }
+        $first = $info.paths[0]
+        if ($first.name -ne $physName) { return $false }
+        if ([double]$first.hz -lt $minPrimaryHz) { return $false }
+        return $true
+    } catch { return $false }
+}
+
+function Save-Blob {
+    if (-not (Test-DuplicateHealthy)) {
+        Write-Log 'snapshot skipped: current topology is not a healthy duplicate' 'WARN'
+        return $false
+    }
+    try {
+        Start-Sleep -Milliseconds 400
         $b64 = [Switcher]::Capture()
+        if (-not (Test-DuplicateHealthy)) {
+            Write-Log 'snapshot skipped: topology changed while capturing' 'WARN'
+            return $false
+        }
         Set-Content -Path $blobPath -Value $b64 -Encoding ASCII -NoNewline
+        $info = [Switcher]::ActiveJson() | ConvertFrom-Json
+        Write-Log ('snapshot saved: ' + (($info.paths | ForEach-Object { "$($_.name)@$($_.hz)" }) -join ', '))
         return $true
     } catch {
         Write-Log ('snapshot failed: ' + $_.Exception.Message) 'WARN'
@@ -310,6 +338,11 @@ function Save-Blob {
 }
 
 function Enter-Solo {
+    # Never trade a working remote picture for a state we cannot come back from.
+    if (-not (Test-Path $blobPath) -and -not (Test-DuplicateHealthy)) {
+        Write-Log 'refusing to switch to single screen: no valid snapshot to restore from' 'WARN'
+        return
+    }
     $r = [Switcher]::Solo($physName)
     Write-Log ("switch -> solo: $r")
     if ($r -notlike 'err*') {
@@ -327,7 +360,7 @@ function Enter-Solo {
 
 function Enter-Clone {
     if (-not (Test-Path $blobPath)) {
-        Write-Log 'no display snapshot yet (start once while duplicated); cannot switch to duplicate' 'WARN'
+        Write-Log 'no display snapshot yet - duplicate the desktop once by hand, the daemon will learn it' 'WARN'
         return $false
     }
     $b64 = (Get-Content $blobPath -Raw).Trim()
@@ -336,7 +369,18 @@ function Enter-Clone {
     Start-Sleep -Milliseconds 2500
     $after = [Switcher]::ActiveJson() | ConvertFrom-Json
     Write-Log ('duplicate result: count=' + $after.count + ' names=' + (($after.paths | ForEach-Object { $_.name }) -join ','))
-    if ([int]$after.count -ge 2) { [Switcher]::Reorder($physName) | Out-Null; return $true }
+    if (Test-DuplicateHealthy) {
+        [Switcher]::Reorder($physName) | Out-Null
+        return $true
+    }
+    # Replay failed: drop the bad snapshot and get back to a safe local picture.
+    Write-Log ('restore failed - discarding snapshot and returning to single screen') 'ERROR'
+    Remove-Item $blobPath -Force -ErrorAction SilentlyContinue
+    Set-Content -Path (Join-Path $stateDir 'restore-failed.flag') -Value (Get-Date).ToString('s') -Encoding ASCII
+    if ($after.count -lt 2) {
+        $cur = [Switcher]::Solo($physName)
+        Write-Log ("emergency solo: $cur") 'ERROR'
+    }
     return $false
 }
 

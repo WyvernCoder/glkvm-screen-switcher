@@ -123,6 +123,7 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
 | `pollSeconds` | `5` | how often the KVM is queried |
 | `revertAfterMisses` | `2` | consecutive "nobody" polls before switching back (1 = fastest, but a page reload causes a blink) |
 | `cloneDwellSeconds` | `10` | minimum time to stay duplicated after a switch, avoids flip-flop while the stream re-handshakes |
+| `minPrimaryHz` | `100` | a snapshot is only accepted when the physical display runs at least this fast; this rejects snapshots taken while the monitor was in PBP/split-screen or another transient mode |
 | `revertToSoloWhenIdle` | `true` | `false` = stay duplicated forever |
 | `ensureHdrOnSolo` | `true` | after switching back, check HDR and re-enable it if supported but off |
 
@@ -145,6 +146,39 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
 * **HDR is per-display state** that Windows keeps; it comes back by itself when the
   duplicate is removed. The script only re-enables it as a safety net, via
   `DisplayConfigSetDeviceInfo(DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE)`.
+* **Snapshots are validated, and the script refuses to walk off a cliff.** Replaying a
+  bad snapshot is unrecoverable in software (see below), so a snapshot is only stored
+  when the topology is a healthy duplicate — two paths, one source, physical monitor
+  first, `hz >= minPrimaryHz`. If a replay ever fails, the bad file is deleted, the
+  desktop is put back on the physical monitor and `state/restore-failed.flag` is written.
+  And if no valid snapshot exists, the daemon will **not** switch to single screen.
+
+## When things go wrong
+
+The dangerous state is "duplicated, but the snapshot is unusable". It happened during
+development: the monitor was switched to PBP/split-screen while the daemon was running,
+so it captured a snapshot of a 1920×2160@50 intermediate mode. After that, every attempt
+to restore the duplicate failed with `SetDisplayConfig=87` and — because Windows drops
+the ghost output from `QueryDisplayConfig` once it is off — nothing could bring it back:
+
+* `DisplaySwitch.exe /clone|/extend|/internal|/external` → no-op or `87`
+* `ChangeDisplaySettingsEx` on the detached device → `DISP_CHANGE_FAILED`
+* disabling/re-enabling the monitor device, `pnputil /restart-device` on the GPU → same broken config restored
+
+What actually works (all software, no cable touching):
+
+```powershell
+# 1. back up and wipe the display configuration database
+reg export "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration" ccd-config.reg /y
+reg delete "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration" /f
+reg delete "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Connectivity" /f
+
+# 2. restart the display adapter so it re-enumerates from EDID
+pnputil /restart-device "PCI\VEN_10DE&DEV_2C02&SUBSYS_41791458&REV_A1\..."
+```
+
+Both monitors then come back in *extend* mode; set the modes, duplicate once by hand,
+and the daemon captures a fresh snapshot. A reboot also works.
 
 ## Known limitations
 
@@ -243,6 +277,35 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1                        
   （并修补重启后会变化的 adapter LUID）。
 * **物理屏排第一**。Windows 用第一个路径的刷新率合成整张桌面，这一步才是把 30Hz 变回 165Hz 的关键。
 * **HDR 是每个显示器的独立状态**，去掉复制后 Windows 会自己恢复；脚本只做兜底补开。
+* **快照会校验，而且不会"走下悬崖"**。回放坏快照在软件层面是救不回来的（见下），所以只有
+  拓扑健康时才存快照：两条路径、同一个 source、物理屏排第一、`hz >= minPrimaryHz`。
+  万一回放失败，会删除坏文件、把桌面放回物理屏，并写 `state/restore-failed.flag`；
+  **没有可用快照时，守护绝不切单屏**。
+
+### 踩过的坑：坏快照
+
+最危险的状态是"正在复制、但快照不可用"。开发时就遇到了：显示器切到分屏（PBP）模式时，
+守护恰好抓了一份 1920×2160@50 的中间态快照。之后每次恢复复制都报 `SetDisplayConfig=87`，
+而且 Windows 一旦关掉那路输出，就会把它从 `QueryDisplayConfig` 里彻底移除，常规办法都失效：
+
+* `DisplaySwitch.exe /clone|/extend|/internal|/external` → 无效或报 87
+* 对已分离的设备调用 `ChangeDisplaySettingsEx` → `DISP_CHANGE_FAILED`
+* 禁用/启用显示器设备、`pnputil /restart-device` 重启显卡 → 又把坏配置原样恢复
+
+真正有效的办法（纯软件，不用碰线）：
+
+```powershell
+# 1. 备份并清空显示配置库
+reg export "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration" ccd-config.reg /y
+reg delete "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration" /f
+reg delete "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Connectivity" /f
+
+# 2. 重启显卡设备，让它按 EDID 重新枚举
+pnputil /restart-device "PCI\VEN_10DE&DEV_2C02&SUBSYS_41791458&REV_A1\..."
+```
+
+之后两块屏会以"扩展"模式回来，设好分辨率、手动切一次复制，守护就会重新抓一份干净快照。
+重启电脑同样有效。
 
 ### 已知限制
 
